@@ -18,4 +18,9 @@ fn main() {
         let err = errno::errno();
         panic!("Error opening socket: {} ({})", err, err.0);
     }
+    let bind_result = unsafe { libc::bind(listen_socket, &listen_sockaddr, std::mem::size_of_val(listen_sockaddr)) };
+    if bind_result == -1 {
+        let err = errno::errno();
+        panic!("Error binding socket: {} ({})", err, err.0);
+    }
 }
