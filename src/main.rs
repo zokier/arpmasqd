@@ -8,6 +8,7 @@ use std::io::Write;
 const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
 const SIOCGIFINDEX: libc::c_int = 0x8933;
+const RECV_BUF_LEN: usize = 1500;
 
 #[allow(non_camel_case_types)]
 struct ifreq {
@@ -57,5 +58,14 @@ fn main() {
     if bind_result == -1 {
         let err = errno::errno();
         panic!("Error binding socket: {} ({})", err, err.0);
+    }
+
+    let buf = [0u8; RECV_BUF_LEN];
+    let recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
+    let mut recv_sockaddr_len: u32 = std::mem::size_of_val(&recv_sockaddr) as u32;
+    let recv_result = unsafe { libc::recvfrom(listen_socket, std::mem::transmute(&buf), RECV_BUF_LEN as u64, 0, std::mem::transmute(&recv_sockaddr), &mut recv_sockaddr_len) };
+    if recv_result == -1 {
+        let err = errno::errno();
+        panic!("Error in recvfrom: {} ({})", err, err.0);
     }
 }
