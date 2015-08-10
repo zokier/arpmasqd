@@ -2,13 +2,16 @@
 
 extern crate libc;
 extern crate errno;
+extern crate rustc_serialize; //debug hex dump
 
 use std::io::Write;
+use rustc_serialize::hex::ToHex;
 
+const ETH_P_ALL: u16 = 0x0003;
 const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
 const SIOCGIFINDEX: libc::c_int = 0x8933;
-const RECV_BUF_LEN: usize = 1500;
+const RECV_BUF_LEN: usize = 1542; 
 
 #[allow(non_camel_case_types)]
 struct ifreq {
@@ -40,14 +43,14 @@ fn main() {
     //unwrap is ok because arg count has been checked
     let listen_iface = args.next().unwrap();
     let send_addr = args.next().unwrap();
-    let listen_socket = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, ETH_P_ARP.to_be() as i32) };
+    let listen_socket = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, ETH_P_ALL.to_be() as i32) };
     if listen_socket == -1 {
         let err = errno::errno();
         panic!("Error opening socket: {} ({})", err, err.0);
     }
     let listen_sockaddr = libc::sockaddr_ll {
         sll_family: libc::AF_PACKET as u16,
-        sll_protocol: ETH_P_ARP.to_be(),
+        sll_protocol: ETH_P_ALL.to_be(),
         sll_ifindex: ifindex_from_ifname(&listen_iface, listen_socket),
         sll_hatype: 0,
         sll_pkttype: 0,
@@ -61,11 +64,12 @@ fn main() {
     }
 
     let buf = [0u8; RECV_BUF_LEN];
-    let recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
+    let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
     let mut recv_sockaddr_len: u32 = std::mem::size_of_val(&recv_sockaddr) as u32;
     let recv_result = unsafe { libc::recvfrom(listen_socket, std::mem::transmute(&buf), RECV_BUF_LEN as u64, 0, std::mem::transmute(&recv_sockaddr), &mut recv_sockaddr_len) };
     if recv_result == -1 {
         let err = errno::errno();
         panic!("Error in recvfrom: {} ({})", err, err.0);
     }
+    println!("{}", buf[0..(recv_result as usize)].to_hex());
 }

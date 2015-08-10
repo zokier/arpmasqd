@@ -6,3 +6,4 @@ authors = ["Torste Aikio <zokier@gmail.com>"]
 [dependencies]
 libc = "*"
 errno = "*"
+rustc-serialize = "*"
