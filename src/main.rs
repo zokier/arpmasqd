@@ -12,7 +12,26 @@ const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
 const SIOCGIFINDEX: libc::c_int = 0x8933;
 const RECV_BUF_LEN: usize = 1542; 
+const SO_ATTACH_FILTER: libc::c_int = 26;
 
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct sock_filter {	/* Filter block */
+	code: u16,   /* Actual filter code */
+	jt: u8,	/* Jump true */
+	jf: u8,	/* Jump false */
+	k: u32      /* Generic multiuse field */
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Debug)]
+struct sock_fprog {     /* Required for SO_ATTACH_FILTER. */
+        len: u16,    /* Number of filter blocks */
+        filter: *const sock_filter
+}
+
+#[repr(C)]
 #[allow(non_camel_case_types)]
 struct ifreq {
     ifr_name: [u8; IFNAMSIZ],
@@ -62,6 +81,11 @@ fn main() {
         let err = errno::errno();
         println!("maybe try: sudo setcap CAP_NET_RAW+eip arpmasqd");
         panic!("Error opening socket: {} ({})", err, err.0);
+    }
+    let attach_filter_res = unsafe { libc::setsockopt(listen_socket, libc::SOL_SOCKET, SO_ATTACH_FILTER, std::mem::transmute(&bpf_filter_arp_incoming_prog), std::mem::size_of_val(&bpf_filter_arp_incoming_prog) as u32) };
+    if attach_filter_res == -1 {
+        let err = errno::errno();
+        panic!("Error attaching filter: {} ({})", err, err.0);
     }
     let listen_sockaddr = libc::sockaddr_ll {
         sll_family: libc::AF_PACKET as u16,
