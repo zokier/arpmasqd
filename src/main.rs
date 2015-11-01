@@ -231,7 +231,8 @@ fn main() {
     args.next();
     //unwrap is ok because arg count has been checked
     let listen_iface = args.next().unwrap();
-    let listen_socket = create_listen_socket(&listen_iface).unwrap_or_else(|err| panic!("Error {}: {} ({})", err.action, err.err, err.err.0));
-
-    do_recv(listen_socket);
+    match create_listen_socket(&listen_iface) {
+        Ok(sock) => do_recv(sock),
+        Err(err) => panic!("Error {}: {} ({})", err.action, err.err, err.err.0)
+    }
 }
