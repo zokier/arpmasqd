@@ -1,13 +1,17 @@
-#![feature(slice_bytes)]
+#![feature(slice_bytes,clone_from_slice)]
 
 extern crate libc;
 extern crate errno;
 extern crate rustc_serialize; //debug hex dump
 
+#[macro_use]
+extern crate nom;
+
 use std::io::Write;
 use rustc_serialize::hex::ToHex;
 
 const ETH_P_ALL: u16 = 0x0003;
+const ETH_P_IP: u16 = 0x0800;
 const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
 const SIOCGIFINDEX: libc::c_int = 0x8933;
@@ -36,6 +40,52 @@ struct sock_fprog {     /* Required for SO_ATTACH_FILTER. */
 struct ifreq {
     ifr_name: [u8; IFNAMSIZ],
     ifr_ifindex: libc::c_int
+}
+
+#[derive(Debug)]
+struct EthernetFrame {
+    dst: MacAddr,
+    src: MacAddr,
+    ty: EthernetType,
+    payload: EthernetPayload,
+}
+
+#[derive(Debug)]
+struct MacAddr([u8; 6]);
+impl MacAddr {
+    fn from_slice(s: &[u8]) -> MacAddr {
+        // bit ugly, is there a better way?
+        let mut m = MacAddr([0u8; 6]);
+        m.0.clone_from_slice(s);
+        return m;
+    }
+}
+#[derive(Debug)]
+struct IpAddr(u32);
+
+#[derive(Debug)]
+#[repr(u16)]
+enum EthernetType {
+    Arp = ETH_P_ARP,
+    Ip = ETH_P_IP
+}
+
+#[derive(Debug)]
+enum EthernetPayload {
+    Arp(ArpPacket),
+}
+
+#[derive(Debug)]
+struct ArpPacket {
+    hwtype: u16,
+    proto: u16,
+    hwsize: u8,
+    protosize: u8,
+    opcode: u16,
+    sender_mac: MacAddr,
+    sender_ip: IpAddr,
+    target_mac: MacAddr,
+    target_ip: IpAddr
 }
 
 fn ifindex_from_ifname(ifname: &str, sock: libc::c_int) -> libc::c_int {
@@ -103,6 +153,50 @@ fn create_listen_socket(iface: &str) -> Result<libc::c_int, SocketError> {
     return Ok(listen_socket);
 }
 
+fn u16_to_be_bytes(i: u16) -> [u8;2] {
+    [((i>>8) & 0xff) as u8, (i & 0xff) as u8]
+}
+
+named!(arp_packet_parser(&[u8]) -> ArpPacket, chain!(
+    hwtype: call!(nom::be_u16)
+    ~ proto: call!(nom::be_u16)
+    ~ hwsize: call!(nom::be_u8)
+    ~ protosize: call!(nom::be_u8)
+    ~ opcode: call!(nom::be_u16)
+    ~ sender_mac: take!(6)
+    ~ sender_ip: call!(nom::be_u32)
+    ~ target_mac: take!(6)
+    ~ target_ip: call!(nom::be_u32),
+    || {
+        ArpPacket {
+            hwtype: hwtype,
+            proto: proto,
+            hwsize: hwsize,
+            protosize: protosize,
+            opcode: opcode,
+            sender_mac: MacAddr::from_slice(sender_mac),
+            sender_ip: IpAddr(sender_ip),
+            target_mac: MacAddr::from_slice(target_mac),
+            target_ip: IpAddr(target_ip)
+        }
+    })
+);
+
+named!(eth_frame_parser(&[u8]) -> EthernetFrame, chain!(
+    dst: take!(6)
+    ~ src: take!(6)
+    ~ _ty: tag!(u16_to_be_bytes(ETH_P_ARP))
+    ~ payload: call!(arp_packet_parser),
+    || {
+        EthernetFrame {
+            dst: MacAddr::from_slice(dst),
+            src: MacAddr::from_slice(src),
+            ty: EthernetType::Arp,
+            payload: EthernetPayload::Arp(payload)
+        }
+    })
+);
+
 fn do_recv(listen_socket: libc::c_int) -> ! {
     let buf = [0u8; RECV_BUF_LEN];
     let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
@@ -115,7 +209,16 @@ fn do_recv(listen_socket: libc::c_int) -> ! {
         }
         // rust has no offsetof yet so we hardcode 12 here instead
         println!("From: {}", recv_sockaddr.sll_addr[0..(recv_sockaddr_len as usize -12)].to_hex());
-        println!("Data: {}", buf[0..(recv_result as usize)].to_hex());
+        //TODO minimum arp packet length?
+        if recv_result >= 42 {
+            if let nom::IResult::Done(_, frame) = eth_frame_parser(&buf[0..(recv_result as usize)]) {
+                println!("{:?}", frame);
+            } else {
+                println!("parser error");
+            }
+        } else {
+            println!("Too short frame ({}): {}", recv_result, buf[0..(recv_result as usize)].to_hex());
+        }
     }
 }
 

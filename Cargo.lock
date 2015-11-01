@@ -4,6 +4,7 @@ version = "0.1.0"
 dependencies = [
  "errno 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nom 1.0.0-beta (registry+https://github.com/rust-lang/crates.io-index)",
  "rustc-serialize 0.3.16 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -29,6 +30,11 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "nom"
+version = "1.0.0-beta"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]

@@ -7,3 +7,4 @@ authors = ["Torste Aikio <zokier@gmail.com>"]
 libc = "*"
 errno = "*"
 rustc-serialize = "*"
+nom = "*"
