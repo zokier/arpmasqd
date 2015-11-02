@@ -15,23 +15,22 @@ const ETH_P_IP: u16 = 0x0800;
 const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
 const SIOCGIFINDEX: libc::c_int = 0x8933;
-const RECV_BUF_LEN: usize = 1542; 
+const RECV_BUF_LEN: usize = 1522;
 const SO_ATTACH_FILTER: libc::c_int = 26;
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
-struct sock_filter {	/* Filter block */
-	code: u16,   /* Actual filter code */
-	jt: u8,	/* Jump true */
-	jf: u8,	/* Jump false */
-	k: u32      /* Generic multiuse field */
+struct sock_filter { /* Filter block */
+    code: u16,       /* Actual filter code */
+    jt: u8,          /* Jump true */
+    jf: u8,          /* Jump false */
+    k: u32           /* Generic multiuse field */
 }
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
-#[derive(Debug)]
 struct sock_fprog {     /* Required for SO_ATTACH_FILTER. */
-        len: u16,    /* Number of filter blocks */
+        len: u16,       /* Number of filter blocks */
         filter: *const sock_filter
 }
 
@@ -46,7 +45,8 @@ struct ifreq {
 struct EthernetFrame {
     dst: MacAddr,
     src: MacAddr,
-    ty: EthernetType,
+    tag: Option<VlanTag>,
+    tysize: EthernetTypeSize,
     payload: EthernetPayload,
 }
 
@@ -60,14 +60,24 @@ impl MacAddr {
         return m;
     }
 }
+
+#[derive(Debug)]
+struct VlanTag(u16);
+
 #[derive(Debug)]
 struct IpAddr(u32);
 
 #[derive(Debug)]
 #[repr(u16)]
-enum EthernetType {
+enum EtherType {
     Arp = ETH_P_ARP,
     Ip = ETH_P_IP
+}
+
+#[derive(Debug)]
+enum EthernetTypeSize {
+    Size(u16),
+    Type(EtherType),
 }
 
 #[derive(Debug)]
@@ -88,29 +98,28 @@ struct ArpPacket {
     target_ip: IpAddr
 }
 
-fn ifindex_from_ifname(ifname: &str, sock: libc::c_int) -> libc::c_int {
-    let mut ifr = ifreq {
-        ifr_name: [0; IFNAMSIZ],
-        ifr_ifindex: 0
-    };
-    std::slice::bytes::copy_memory(ifname.as_bytes(), &mut ifr.ifr_name);
-    if unsafe { libc::funcs::bsd44::ioctl(sock, SIOCGIFINDEX, &ifr) } == -1 {
-        let err = errno::errno();
-        panic!("Error getting ifindex: {} ({})", err, err.0);
-    }
-    return ifr.ifr_ifindex;
-
-}
-
 struct SocketError { 
     action: &'static str,
     err: errno::Errno
 }
 
 macro_rules! sockerr {
-    ($action:expr) => {
-        return Err(SocketError{ action: $action, err: errno::errno() });
+    ($action:expr, $res:expr) => {
+        if $res == -1 {
+            return Err(SocketError{ action: $action, err: errno::errno() });
+        }
     };
+}
+
+fn ifindex_from_ifname(ifname: &str, sock: libc::c_int) -> Result<libc::c_int, SocketError> {
+    let mut ifr = ifreq {
+        ifr_name: [0; IFNAMSIZ],
+        ifr_ifindex: 0
+    };
+    std::slice::bytes::copy_memory(ifname.as_bytes(), &mut ifr.ifr_name);
+    let res = unsafe { libc::funcs::bsd44::ioctl(sock, SIOCGIFINDEX, &ifr) };
+    sockerr!("getting ifindex", res);
+    return Ok(ifr.ifr_ifindex);
 }
 
 fn create_listen_socket(iface: &str) -> Result<libc::c_int, SocketError> {
@@ -128,28 +137,40 @@ fn create_listen_socket(iface: &str) -> Result<libc::c_int, SocketError> {
         filter: bpf_filter_arp_incoming.as_ptr()
     };
 
-    let listen_socket = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, ETH_P_ALL.to_be() as i32) };
-    if listen_socket == -1 {
-        println!("try: sudo setcap CAP_NET_RAW+eip arpmasqd");
-        sockerr!("opening socket");
-    }
-    let attach_filter_res = unsafe { libc::setsockopt(listen_socket, libc::SOL_SOCKET, SO_ATTACH_FILTER, std::mem::transmute(&bpf_filter_arp_incoming_prog), std::mem::size_of_val(&bpf_filter_arp_incoming_prog) as u32) };
-    if attach_filter_res == -1 {
-        sockerr!("attaching filter");
-    }
+    let listen_socket = unsafe {
+        libc::socket(libc::AF_PACKET, libc::SOCK_RAW, ETH_P_ALL.to_be() as i32)
+    };
+    sockerr!("opening socket", listen_socket);
+    let attach_filter_res = unsafe {
+        libc::setsockopt(
+            listen_socket,
+            libc::SOL_SOCKET,
+            SO_ATTACH_FILTER,
+            std::mem::transmute(&bpf_filter_arp_incoming_prog),
+            std::mem::size_of_val(&bpf_filter_arp_incoming_prog) as u32
+        )
+    };
+    sockerr!("attaching filter", attach_filter_res);
+
+    let ifindex = try!(ifindex_from_ifname(&iface, listen_socket));
+
     let listen_sockaddr = libc::sockaddr_ll {
         sll_family: libc::AF_PACKET as u16,
         sll_protocol: ETH_P_ALL.to_be(),
-        sll_ifindex: ifindex_from_ifname(&iface, listen_socket),
+        sll_ifindex: ifindex,
         sll_hatype: 0,
         sll_pkttype: 0,
         sll_halen: 0,
         sll_addr: [0; 8]
     };
-    let bind_result = unsafe { libc::bind(listen_socket, std::mem::transmute(&listen_sockaddr), std::mem::size_of_val(&listen_sockaddr) as u32) };
-    if bind_result == -1 {
-        sockerr!("binding socket");
-    }
+    let bind_result = unsafe {
+        libc::bind(
+            listen_socket,
+            std::mem::transmute(&listen_sockaddr),
+            std::mem::size_of_val(&listen_sockaddr) as u32
+        )
+    };
+    sockerr!("binding socket", bind_result);
     return Ok(listen_socket);
 }
 
@@ -185,36 +206,61 @@ named!(arp_packet_parser(&[u8]) -> ArpPacket, chain!(
 named!(eth_frame_parser(&[u8]) -> EthernetFrame, chain!(
     dst: take!(6)
     ~ src: take!(6)
-    ~ _ty: tag!(u16_to_be_bytes(ETH_P_ARP))
+    ~ tag: opt!(
+        chain!(
+            _tpid: tag!(u16_to_be_bytes(0x8100))
+            ~ tci: call!(nom::be_u16),
+            || {
+                VlanTag(tci)
+            }
+        )
+    )
+    ~ tysize: call!(nom::be_u16)
     ~ payload: call!(arp_packet_parser),
     || {
+        let tysize = if tysize < 0x0600 {
+            EthernetTypeSize::Size(tysize)
+        } else {
+            //TODO safe way to convert u16->EtherType
+            // tysize comes directly from network so this is VERY BAD
+            EthernetTypeSize::Type(unsafe { std::mem::transmute(tysize) } )
+        };
         EthernetFrame {
             dst: MacAddr::from_slice(dst),
             src: MacAddr::from_slice(src),
-            ty: EthernetType::Arp,
+            tag: tag,
+            tysize: tysize,
             payload: EthernetPayload::Arp(payload)
         }
     })
 );
 
-fn do_recv(listen_socket: libc::c_int) -> ! {
+fn do_recv(listen_socket: libc::c_int) -> SocketError {
     let buf = [0u8; RECV_BUF_LEN];
     let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
     let mut recv_sockaddr_len: u32 = std::mem::size_of_val(&recv_sockaddr) as u32;
     loop {
-        let recv_result = unsafe { libc::recvfrom(listen_socket, std::mem::transmute(&buf), RECV_BUF_LEN as u64, 0, std::mem::transmute(&recv_sockaddr), &mut recv_sockaddr_len) };
+        let recv_result = unsafe {
+            libc::recvfrom(
+                listen_socket,
+                std::mem::transmute(&buf),
+                RECV_BUF_LEN as u64,
+                0,
+                std::mem::transmute(&recv_sockaddr),
+                &mut recv_sockaddr_len
+            )
+        };
         if recv_result == -1 {
-            let err = errno::errno();
-            panic!("Error in recvfrom: {} ({})", err, err.0);
+            return SocketError { action: "recvfrom", err: errno::errno() };
         }
         // rust has no offsetof yet so we hardcode 12 here instead
-        println!("From: {}", recv_sockaddr.sll_addr[0..(recv_sockaddr_len as usize -12)].to_hex());
+        // println!("From: {}", recv_sockaddr.sll_addr[0..(recv_sockaddr_len as usize -12)].to_hex());
         //TODO minimum arp packet length?
         if recv_result >= 42 {
-            if let nom::IResult::Done(_, frame) = eth_frame_parser(&buf[0..(recv_result as usize)]) {
-                println!("{:?}", frame);
-            } else {
-                println!("parser error");
+            match eth_frame_parser(&buf[0..(recv_result as usize)]) {
+                nom::IResult::Done(_i, frame) => println!("Parser done: {:?}", frame),
+                nom::IResult::Error(err) => println!("Parser error: {:?}", err),
+                nom::IResult::Incomplete(needed) => println!("Parser incomplete: {:?}", needed)
             }
         } else {
             println!("Too short frame ({}): {}", recv_result, buf[0..(recv_result as usize)].to_hex());
@@ -222,17 +268,24 @@ fn do_recv(listen_socket: libc::c_int) -> ! {
     }
 }
 
-fn main() {
+fn main_wrapper() -> i32 {
     let mut args = std::env::args();
     if args.len() != 2 {
         std::io::stderr().write("Usage: arpmasqd LISTEN_IFACE\n".as_ref()).unwrap();
-        panic!("number of arguments");
+        std::io::stderr().write("Error: Missing LISTEN_IFACE\n".as_ref()).unwrap();
+        return 1;
     }
     args.next();
     //unwrap is ok because arg count has been checked
     let listen_iface = args.next().unwrap();
-    match create_listen_socket(&listen_iface) {
+    let err = match create_listen_socket(&listen_iface) {
         Ok(sock) => do_recv(sock),
-        Err(err) => panic!("Error {}: {} ({})", err.action, err.err, err.err.0)
-    }
+        Err(err) => err
+    };
+    std::io::stderr().write(format!("Error {}: {} ({})\n", err.action, err.err, err.err.0).as_ref()).unwrap();
+    return 1;
+}
+
+fn main() {
+    std::process::exit(main_wrapper());
 }
