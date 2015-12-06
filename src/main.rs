@@ -61,11 +61,27 @@ impl MacAddr {
     }
 }
 
+impl std::fmt::Display for MacAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+               self.0[0], self.0[1], self.0[2],
+               self.0[3], self.0[4], self.0[5])
+    }
+}
+
 #[derive(Debug)]
 struct VlanTag(u16);
 
 #[derive(Debug)]
 struct IpAddr(u32);
+
+impl std::fmt::Display for IpAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}.{}.{}.{}",
+               (self.0 >> 24) & 0xff, (self.0 >> 16) & 0xff,
+               (self.0 >> 8) & 0xff, self.0 & 0xff)
+    }
+}
 
 #[derive(Debug)]
 #[repr(u16)]
@@ -246,11 +262,11 @@ named!(eth_frame_parser(&[u8]) -> EthernetFrame, chain!(
 );
 
 fn handle_arp_request(arp_packet: &ArpPacket) {
-    println!("request from {:?} ({:?}) who-has {:?}?", arp_packet.sender_mac, arp_packet.sender_ip, arp_packet.target_ip);
+    println!("request from {} ({}) who-has {}?", arp_packet.sender_mac, arp_packet.sender_ip, arp_packet.target_ip);
 }
 
 fn handle_arp_response(arp_packet: &ArpPacket) {
-    println!("response from {:?} is-at {:?}", arp_packet.sender_ip, arp_packet.sender_mac);
+    println!("response from {} is-at {}", arp_packet.sender_ip, arp_packet.sender_mac);
 }
 
 fn handle_arp_packet(eth_frame: &EthernetFrame) {
