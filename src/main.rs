@@ -245,6 +245,29 @@ named!(eth_frame_parser(&[u8]) -> EthernetFrame, chain!(
     })
 );
 
+fn handle_arp_request(arp_packet: &ArpPacket) {
+    println!("request from {:?} ({:?}) who-has {:?}?", arp_packet.sender_mac, arp_packet.sender_ip, arp_packet.target_ip);
+}
+
+fn handle_arp_response(arp_packet: &ArpPacket) {
+    println!("response from {:?} is-at {:?}", arp_packet.sender_ip, arp_packet.sender_mac);
+}
+
+fn handle_arp_packet(eth_frame: &EthernetFrame) {
+    let EthernetPayload::Arp(ref arp_packet) = eth_frame.payload;
+    if arp_packet.hwtype == 1
+        && arp_packet.proto == ETH_P_IP
+        && arp_packet.hwsize == 6
+        && arp_packet.protosize == 4
+    {
+        if arp_packet.opcode == 1 { //request
+            handle_arp_request(arp_packet)
+        } else if arp_packet.opcode == 2 { //response
+            handle_arp_response(arp_packet)
+        }
+    }
+}
+
 fn do_recv(listen_socket: libc::c_int) -> SocketError {
     let buf = [0u8; RECV_BUF_LEN];
     let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
@@ -268,7 +291,7 @@ fn do_recv(listen_socket: libc::c_int) -> SocketError {
         //TODO minimum arp packet length?
         if recv_result >= 42 {
             match eth_frame_parser(&buf[0..(recv_result as usize)]) {
-                nom::IResult::Done(_i, frame) => println!("Parser done: {:?}", frame),
+                nom::IResult::Done(_i, frame) => handle_arp_packet(&frame),
                 nom::IResult::Error(err) => println!("Parser error: {:?}", err),
                 nom::IResult::Incomplete(needed) => println!("Parser incomplete: {:?}", needed)
             }
