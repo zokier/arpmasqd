@@ -14,7 +14,7 @@ const ETH_P_ALL: u16 = 0x0003;
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
-const SIOCGIFINDEX: libc::c_int = 0x8933;
+const SIOCGIFINDEX: libc::c_ulong = 0x8933;
 const RECV_BUF_LEN: usize = 1522;
 const SO_ATTACH_FILTER: libc::c_int = 26;
 
@@ -117,7 +117,7 @@ fn ifindex_from_ifname(ifname: &str, sock: libc::c_int) -> Result<libc::c_int, S
         ifr_ifindex: 0
     };
     std::slice::bytes::copy_memory(ifname.as_bytes(), &mut ifr.ifr_name);
-    let res = unsafe { libc::funcs::bsd44::ioctl(sock, SIOCGIFINDEX, &ifr) };
+    let res = unsafe { libc::ioctl(sock, SIOCGIFINDEX, &ifr) };
     sockerr!("getting ifindex", res);
     return Ok(ifr.ifr_ifindex);
 }
@@ -244,7 +244,7 @@ fn do_recv(listen_socket: libc::c_int) -> SocketError {
             libc::recvfrom(
                 listen_socket,
                 std::mem::transmute(&buf),
-                RECV_BUF_LEN as u64,
+                RECV_BUF_LEN,
                 0,
                 std::mem::transmute(&recv_sockaddr),
                 &mut recv_sockaddr_len
