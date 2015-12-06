@@ -71,7 +71,7 @@ struct IpAddr(u32);
 #[repr(u16)]
 enum EtherType {
     Arp = ETH_P_ARP,
-    Ip = ETH_P_IP
+    _Ip = ETH_P_IP
 }
 
 #[derive(Debug)]
@@ -203,6 +203,23 @@ named!(arp_packet_parser(&[u8]) -> ArpPacket, chain!(
     })
 );
 
+fn tysize_parser(input: &[u8]) -> nom::IResult<&[u8], EthernetTypeSize> {
+    match nom::be_u16(input) {
+        nom::IResult::Done(i,tysize) => {
+            if tysize == ETH_P_ARP {
+                nom::IResult::Done(i,EthernetTypeSize::Type(EtherType::Arp))
+            } else if tysize < 0x0600 {
+                nom::IResult::Done(i,EthernetTypeSize::Size(tysize))
+            } else {
+                //TODO better error code
+                nom::IResult::Error(nom::Err::Code(nom::ErrorKind::Custom(1)))
+            }
+        },
+        nom::IResult::Error(err) => nom::IResult::Error(err),
+        nom::IResult::Incomplete(need) => nom::IResult::Incomplete(need)
+    }
+}
+
 named!(eth_frame_parser(&[u8]) -> EthernetFrame, chain!(
     dst: take!(6)
     ~ src: take!(6)
@@ -215,16 +232,9 @@ named!(eth_frame_parser(&[u8]) -> EthernetFrame, chain!(
             }
         )
     )
-    ~ tysize: call!(nom::be_u16)
+    ~ tysize: call!(tysize_parser)
     ~ payload: call!(arp_packet_parser),
     || {
-        let tysize = if tysize < 0x0600 {
-            EthernetTypeSize::Size(tysize)
-        } else {
-            //TODO safe way to convert u16->EtherType
-            // tysize comes directly from network so this is VERY BAD
-            EthernetTypeSize::Type(unsafe { std::mem::transmute(tysize) } )
-        };
         EthernetFrame {
             dst: MacAddr::from_slice(dst),
             src: MacAddr::from_slice(src),
