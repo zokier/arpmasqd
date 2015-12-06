@@ -269,7 +269,7 @@ fn handle_arp_response(arp_packet: &ArpPacket) {
     println!("response from {} is-at {}", arp_packet.sender_ip, arp_packet.sender_mac);
 }
 
-fn handle_arp_packet(eth_frame: &EthernetFrame) {
+fn handle_arp_from_right(eth_frame: &EthernetFrame) {
     let EthernetPayload::Arp(ref arp_packet) = eth_frame.payload;
     if arp_packet.hwtype == 1
         && arp_packet.proto == ETH_P_IP
@@ -284,12 +284,28 @@ fn handle_arp_packet(eth_frame: &EthernetFrame) {
     }
 }
 
-fn do_recv(listen_socket: libc::c_int) -> SocketError {
+fn handle_arp_from_left(eth_frame: &EthernetFrame) {
+    let EthernetPayload::Arp(ref arp_packet) = eth_frame.payload;
+    if arp_packet.hwtype == 1
+        && arp_packet.proto == ETH_P_IP
+        && arp_packet.hwsize == 6
+        && arp_packet.protosize == 4
+    {
+        if arp_packet.opcode == 1 { //request
+            handle_arp_request(arp_packet)
+        } else if arp_packet.opcode == 2 { //response
+            handle_arp_response(arp_packet)
+        }
+    }
+}
+
+fn do_recv(listen_socket: libc::c_int, ctrl_pipe: libc::c_int, handle_arp_packet: fn(&EthernetFrame)) -> SocketError {
     let buf = [0u8; RECV_BUF_LEN];
     let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
     let mut recv_sockaddr_len: u32 = std::mem::size_of_val(&recv_sockaddr) as u32;
     loop {
         let recv_result = unsafe {
+            // use poll/select
             libc::recvfrom(
                 listen_socket,
                 std::mem::transmute(&buf),
@@ -317,21 +333,69 @@ fn do_recv(listen_socket: libc::c_int) -> SocketError {
     }
 }
 
+struct Worker<T> {
+    ctrl_pipe: libc::c_int,
+    thread: std::thread::JoinHandle<T>,
+}
+
+fn create_worker(iface: &str, barrier: &std::sync::Arc<std::sync::Barrier>, callback: fn(&EthernetFrame)) -> Result<Worker<SocketError>, SocketError> {
+    let barrier = barrier.clone();
+    let pipes: [libc::c_int; 2] = [0; 2];
+    unsafe { libc::pipe(std::mem::transmute(&pipes)) };
+    let read_pipe = pipes[0];
+    let write_pipe = pipes[1];
+    let thread = match create_listen_socket(&iface) {
+        Ok(sock) => std::thread::spawn(move || { let ret = do_recv(sock, read_pipe, callback); barrier.wait(); ret }),
+        Err(err) => {
+            std::io::stderr().write(format!("Error {}: {} ({})\n", err.action, err.err, err.err.0).as_ref()).unwrap();
+            return Err(err);
+        }
+    };
+    return Ok(Worker { ctrl_pipe: write_pipe, thread: thread })
+}
+
 fn main_wrapper() -> i32 {
     let mut args = std::env::args();
-    if args.len() != 2 {
-        std::io::stderr().write("Usage: arpmasqd LISTEN_IFACE\n".as_ref()).unwrap();
-        std::io::stderr().write("Error: Missing LISTEN_IFACE\n".as_ref()).unwrap();
+    if args.len() != 3 {
+        std::io::stderr().write("Usage: arpmasqd LEFT_IFACE RIGHT_IFACE\n".as_ref()).unwrap();
         return 1;
     }
     args.next();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     //unwrap is ok because arg count has been checked
-    let listen_iface = args.next().unwrap();
-    let err = match create_listen_socket(&listen_iface) {
-        Ok(sock) => do_recv(sock),
-        Err(err) => err
+    let left_iface = args.next().unwrap();
+    let left_worker = match create_worker(&left_iface, &barrier, handle_arp_from_left) {
+        Ok(worker) => worker,
+        Err(err) => panic!("TODO")
     };
-    std::io::stderr().write(format!("Error {}: {} ({})\n", err.action, err.err, err.err.0).as_ref()).unwrap();
+    let right_iface = args.next().unwrap();
+    let right_worker = match create_worker(&right_iface, &barrier, handle_arp_from_right) {
+        Ok(worker) => worker,
+        Err(err) => panic!("TODO")
+    };
+
+    barrier.wait();
+    unsafe {
+        libc::write(left_worker.ctrl_pipe, std::mem::transmute(&'\0'), 1);
+        libc::write(right_worker.ctrl_pipe, std::mem::transmute(&'\0'), 1);
+    }
+
+    match left_worker.thread.join() {
+        Ok(err) => {
+            std::io::stderr().write(format!("Error {}: {} ({})\n", err.action, err.err, err.err.0).as_ref()).unwrap();
+        },
+        Err(err) => {
+            std::io::stderr().write(format!("Panic {:?}\n", err).as_ref()).unwrap();
+        }
+    }
+    match right_worker.thread.join() {
+        Ok(err) => {
+            std::io::stderr().write(format!("Error {}: {} ({})\n", err.action, err.err, err.err.0).as_ref()).unwrap();
+        },
+        Err(err) => {
+            std::io::stderr().write(format!("Panic {:?}\n", err).as_ref()).unwrap();
+        }
+    }
     return 1;
 }
 
