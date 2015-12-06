@@ -30,8 +30,8 @@ struct sock_filter { /* Filter block */
 #[repr(C)]
 #[allow(non_camel_case_types)]
 struct sock_fprog {     /* Required for SO_ATTACH_FILTER. */
-        len: u16,       /* Number of filter blocks */
-        filter: *const sock_filter
+    len: u16,           /* Number of filter blocks */
+    filter: *const sock_filter
 }
 
 #[repr(C)]
