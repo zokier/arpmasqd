@@ -1,4 +1,4 @@
-#![feature(slice_bytes,clone_from_slice)]
+#![feature(slice_bytes,clone_from_slice,box_syntax)]
 
 extern crate libc;
 extern crate errno;
@@ -303,15 +303,34 @@ fn do_recv(listen_socket: libc::c_int, ctrl_pipe: libc::c_int, handle_arp_packet
     let buf = [0u8; RECV_BUF_LEN];
     let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
     let mut recv_sockaddr_len: u32 = std::mem::size_of_val(&recv_sockaddr) as u32;
+    let readfds: *mut libc::fd_set = std::boxed::Box::into_raw(unsafe {
+        box std::mem::zeroed::<libc::fd_set>()
+    });
+    let writefds: *mut libc::fd_set = std::ptr::null_mut();
+    let exceptfds: *mut libc::fd_set = std::ptr::null_mut();
+    let timeout: *mut libc::timeval = std::ptr::null_mut();
+    let nfds: libc::c_int = std::cmp::max(listen_socket, ctrl_pipe);
     loop {
         let recv_result = unsafe {
-            // use poll/select
+            libc::FD_ZERO(readfds);
+            libc::FD_SET(ctrl_pipe, readfds);
+            libc::FD_SET(listen_socket, readfds);
+            let select_result = libc::select(nfds, readfds, writefds, exceptfds, timeout);
+            if select_result == -1 {
+                return SocketError { action: "select", err: errno::errno() };
+            }
+            if libc::FD_ISSET(ctrl_pipe, readfds) {
+                return SocketError { action: "FD_ISSET(ctrl_pipe)", err: errno::errno() };
+            }
+            if !libc::FD_ISSET(listen_socket, readfds) {
+                return SocketError { action: "!FD_ISSET(listen_socket)", err: errno::errno() };
+            }
             libc::recvfrom(
                 listen_socket,
                 std::mem::transmute(&buf),
                 RECV_BUF_LEN,
                 0,
-                std::mem::transmute(&recv_sockaddr),
+                std::mem::transmute(&mut recv_sockaddr),
                 &mut recv_sockaddr_len
             )
         };
