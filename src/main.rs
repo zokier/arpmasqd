@@ -17,6 +17,7 @@ const IFNAMSIZ: usize = 16; // net/if.h
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
 const RECV_BUF_LEN: usize = 1522;
 const SO_ATTACH_FILTER: libc::c_int = 26;
+const SOCK_SEQPACKET: libc::c_int = 5;
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -299,7 +300,7 @@ fn handle_arp_from_left(eth_frame: &EthernetFrame) {
     }
 }
 
-fn do_recv(listen_socket: libc::c_int, ctrl_pipe: libc::c_int, handle_arp_packet: fn(&EthernetFrame)) -> SocketError {
+fn do_recv(listen_socket: libc::c_int, ctrl_socket: libc::c_int, handle_arp_packet: fn(&EthernetFrame)) -> SocketError {
     let buf = [0u8; RECV_BUF_LEN];
     let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
     let mut recv_sockaddr_len: u32 = std::mem::size_of_val(&recv_sockaddr) as u32;
@@ -309,18 +310,18 @@ fn do_recv(listen_socket: libc::c_int, ctrl_pipe: libc::c_int, handle_arp_packet
     let writefds: *mut libc::fd_set = std::ptr::null_mut();
     let exceptfds: *mut libc::fd_set = std::ptr::null_mut();
     let timeout: *mut libc::timeval = std::ptr::null_mut();
-    let nfds: libc::c_int = std::cmp::max(listen_socket, ctrl_pipe);
+    let nfds: libc::c_int = std::cmp::max(listen_socket, ctrl_socket);
     loop {
         let recv_result = unsafe {
             libc::FD_ZERO(readfds);
-            libc::FD_SET(ctrl_pipe, readfds);
+            libc::FD_SET(ctrl_socket, readfds);
             libc::FD_SET(listen_socket, readfds);
             let select_result = libc::select(nfds, readfds, writefds, exceptfds, timeout);
             if select_result == -1 {
                 return SocketError { action: "select", err: errno::errno() };
             }
-            if libc::FD_ISSET(ctrl_pipe, readfds) {
-                return SocketError { action: "FD_ISSET(ctrl_pipe)", err: errno::errno() };
+            if libc::FD_ISSET(ctrl_socket, readfds) {
+                return SocketError { action: "FD_ISSET(ctrl_socket)", err: errno::errno() };
             }
             if !libc::FD_ISSET(listen_socket, readfds) {
                 return SocketError { action: "!FD_ISSET(listen_socket)", err: errno::errno() };
@@ -353,24 +354,22 @@ fn do_recv(listen_socket: libc::c_int, ctrl_pipe: libc::c_int, handle_arp_packet
 }
 
 struct Worker<T> {
-    ctrl_pipe: libc::c_int,
     thread: std::thread::JoinHandle<T>,
 }
 
-fn create_worker(iface: &str, barrier: &std::sync::Arc<std::sync::Barrier>, callback: fn(&EthernetFrame)) -> Result<Worker<SocketError>, SocketError> {
-    let barrier = barrier.clone();
-    let pipes: [libc::c_int; 2] = [0; 2];
-    unsafe { libc::pipe(std::mem::transmute(&pipes)) };
-    let read_pipe = pipes[0];
-    let write_pipe = pipes[1];
+fn create_worker(iface: &str, ctrl_socket: libc::c_int, callback: fn(&EthernetFrame)) -> Result<Worker<SocketError>, SocketError> {
     let thread = match create_listen_socket(&iface) {
-        Ok(sock) => std::thread::spawn(move || { let ret = do_recv(sock, read_pipe, callback); barrier.wait(); ret }),
+        Ok(sock) => std::thread::spawn(move || {
+            let ret = do_recv(sock, ctrl_socket, callback);
+            unsafe { libc::write(ctrl_socket, std::mem::transmute(&'\0'), 1) };
+            return ret;
+        }),
         Err(err) => {
             std::io::stderr().write(format!("Error {}: {} ({})\n", err.action, err.err, err.err.0).as_ref()).unwrap();
             return Err(err);
         }
     };
-    return Ok(Worker { ctrl_pipe: write_pipe, thread: thread })
+    return Ok(Worker { thread: thread })
 }
 
 fn main_wrapper() -> i32 {
@@ -380,24 +379,24 @@ fn main_wrapper() -> i32 {
         return 1;
     }
     args.next();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let [left_ctrl, right_ctrl] = unsafe {
+        let mut socks: [libc::c_int;2] = [0,0];
+        libc::socketpair(libc::AF_UNIX, SOCK_SEQPACKET, 0, socks.as_mut_ptr());
+        socks
+    };
+
     //unwrap is ok because arg count has been checked
     let left_iface = args.next().unwrap();
-    let left_worker = match create_worker(&left_iface, &barrier, handle_arp_from_left) {
+    let left_worker = match create_worker(&left_iface, left_ctrl, handle_arp_from_left) {
         Ok(worker) => worker,
         Err(err) => panic!("TODO")
     };
     let right_iface = args.next().unwrap();
-    let right_worker = match create_worker(&right_iface, &barrier, handle_arp_from_right) {
+    let right_worker = match create_worker(&right_iface, right_ctrl, handle_arp_from_right) {
         Ok(worker) => worker,
         Err(err) => panic!("TODO")
     };
-
-    barrier.wait();
-    unsafe {
-        libc::write(left_worker.ctrl_pipe, std::mem::transmute(&'\0'), 1);
-        libc::write(right_worker.ctrl_pipe, std::mem::transmute(&'\0'), 1);
-    }
 
     match left_worker.thread.join() {
         Ok(err) => {
