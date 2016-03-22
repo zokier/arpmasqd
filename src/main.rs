@@ -1,4 +1,4 @@
-#![feature(slice_bytes,clone_from_slice,box_syntax)]
+#![feature(box_syntax,slice_patterns)]
 
 extern crate libc;
 extern crate errno;
@@ -132,7 +132,7 @@ fn ifindex_from_ifname(ifname: &str, sock: libc::c_int) -> Result<libc::c_int, S
         ifr_name: [0; IFNAMSIZ],
         ifr_ifindex: 0
     };
-    std::slice::bytes::copy_memory(ifname.as_bytes(), &mut ifr.ifr_name);
+    ifr.ifr_name.as_mut().write(ifname.as_bytes()).unwrap();
     let res = unsafe { libc::ioctl(sock, SIOCGIFINDEX, &ifr) };
     sockerr!("getting ifindex", res);
     return Ok(ifr.ifr_ifindex);
