@@ -310,7 +310,7 @@ fn do_recv(listen_socket: libc::c_int, ctrl_socket: libc::c_int, handle_arp_pack
     let writefds: *mut libc::fd_set = std::ptr::null_mut();
     let exceptfds: *mut libc::fd_set = std::ptr::null_mut();
     let timeout: *mut libc::timeval = std::ptr::null_mut();
-    let nfds: libc::c_int = std::cmp::max(listen_socket, ctrl_socket);
+    let nfds: libc::c_int = std::cmp::max(listen_socket, ctrl_socket) + 1;
     loop {
         let recv_result = unsafe {
             libc::FD_ZERO(readfds);
