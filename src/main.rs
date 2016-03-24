@@ -14,6 +14,9 @@ const ETH_P_ALL: u16 = 0x0003;
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
+const SIOCGIFADDR: libc::c_ulong = 0x8915;
+const SIOCGIFNETMASK: libc::c_ulong = 0x891b;
+const SIOCGIFHWADDR: libc::c_ulong = 0x8927;
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
 const RECV_BUF_LEN: usize = 1522;
 const SO_ATTACH_FILTER: libc::c_int = 26;
@@ -37,7 +40,21 @@ struct sock_fprog {     /* Required for SO_ATTACH_FILTER. */
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
-struct ifreq {
+struct ifreq_ifhwaddr {
+    ifr_name: [u8; IFNAMSIZ],
+    ifr_ifhwaddr: libc::sockaddr
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct ifreq_ifaddr {
+    ifr_name: [u8; IFNAMSIZ],
+    ifr_ifaddr: libc::sockaddr_in
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct ifreq_ifindex {
     ifr_name: [u8; IFNAMSIZ],
     ifr_ifindex: libc::c_int
 }
@@ -73,7 +90,7 @@ impl std::fmt::Display for MacAddr {
 #[derive(Debug)]
 struct VlanTag(u16);
 
-#[derive(Debug)]
+#[derive(Debug,Copy,Clone)]
 struct IpAddr(u32);
 
 impl std::fmt::Display for IpAddr {
@@ -115,6 +132,7 @@ struct ArpPacket {
     target_ip: IpAddr
 }
 
+#[derive(Debug)]
 struct SocketError { 
     action: &'static str,
     err: errno::Errno
@@ -128,8 +146,47 @@ macro_rules! sockerr {
     };
 }
 
+fn ifhwaddr_from_ifname(ifname: &str, sock: libc::c_int) -> Result<MacAddr, SocketError> {
+    let mut ifr = ifreq_ifhwaddr {
+        ifr_name: [0; IFNAMSIZ],
+        ifr_ifhwaddr: unsafe { std::mem::zeroed() }
+    };
+    ifr.ifr_name.as_mut().write(ifname.as_bytes()).unwrap();
+    let res = unsafe { libc::ioctl(sock, SIOCGIFHWADDR, &ifr) };
+    sockerr!("getting ifhwaddr", res);
+    unsafe {
+    return Ok(MacAddr::from_slice(std::mem::transmute(&ifr.ifr_ifhwaddr.sa_data[0..6])));
+    }
+}
+
+fn swap_endianess(i: u32) -> u32 {
+    ((i >> 24) & 0xFF) | (((i >> 16) & 0xFF) << 8) | (((i >> 8) & 0xFF) << 16) | ((i & 0xFF) << 24)
+}
+
+fn ifnetmask_from_ifname(ifname: &str, sock: libc::c_int) -> Result<IpAddr, SocketError> {
+    let mut ifr = ifreq_ifaddr {
+        ifr_name: [0; IFNAMSIZ],
+        ifr_ifaddr: unsafe { std::mem::zeroed() }
+    };
+    ifr.ifr_name.as_mut().write(ifname.as_bytes()).unwrap();
+    let res = unsafe { libc::ioctl(sock, SIOCGIFNETMASK, &ifr) };
+    sockerr!("getting ifaddr", res);
+    return Ok(IpAddr(swap_endianess(ifr.ifr_ifaddr.sin_addr.s_addr)));
+}
+
+fn ifaddr_from_ifname(ifname: &str, sock: libc::c_int) -> Result<IpAddr, SocketError> {
+    let mut ifr = ifreq_ifaddr {
+        ifr_name: [0; IFNAMSIZ],
+        ifr_ifaddr: unsafe { std::mem::zeroed() }
+    };
+    ifr.ifr_name.as_mut().write(ifname.as_bytes()).unwrap();
+    let res = unsafe { libc::ioctl(sock, SIOCGIFADDR, &ifr) };
+    sockerr!("getting ifaddr", res);
+    return Ok(IpAddr(swap_endianess(ifr.ifr_ifaddr.sin_addr.s_addr)));
+}
+
 fn ifindex_from_ifname(ifname: &str, sock: libc::c_int) -> Result<libc::c_int, SocketError> {
-    let mut ifr = ifreq {
+    let mut ifr = ifreq_ifindex {
         ifr_name: [0; IFNAMSIZ],
         ifr_ifindex: 0
     };
@@ -262,45 +319,68 @@ named!(eth_frame_parser(&[u8]) -> EthernetFrame, chain!(
     })
 );
 
-fn handle_arp_request(arp_packet: &ArpPacket) {
-    println!("request from {} ({}) who-has {}?", arp_packet.sender_mac, arp_packet.sender_ip, arp_packet.target_ip);
+fn netmap_ip(src: IpAddr, dst: IpAddr, mask: IpAddr) -> IpAddr {
+    IpAddr((src.0 & !mask.0) | (dst.0 & mask.0))
 }
 
-fn handle_arp_response(arp_packet: &ArpPacket) {
-    println!("response from {} is-at {}", arp_packet.sender_ip, arp_packet.sender_mac);
+struct LinkInfo {
+    ifname: String,
+    ifindex: libc::c_int,
+    addr: IpAddr,
+    mask: IpAddr,
+    hwaddr: MacAddr,
+    send_socket: libc::c_int,
 }
 
-fn handle_arp_from_right(eth_frame: &EthernetFrame) {
+fn create_send_socket() -> Result<libc::c_int, SocketError> {
+    let send_socket = unsafe {
+        libc::socket(libc::AF_PACKET, libc::SOCK_RAW, ETH_P_ALL.to_be() as i32)
+    };
+    sockerr!("opening socket", send_socket);
+
+    return Ok(send_socket);
+}
+
+impl LinkInfo {
+    fn new(ifname: &str) -> LinkInfo {
+        let sock = create_send_socket().unwrap();
+        LinkInfo {
+            ifname: ifname.to_owned(),
+            ifindex: ifindex_from_ifname(ifname, sock).unwrap(),
+            addr: ifaddr_from_ifname(ifname, sock).unwrap(),
+            mask: ifnetmask_from_ifname(ifname, sock).unwrap(),
+            hwaddr: ifhwaddr_from_ifname(ifname, sock).unwrap(),
+            send_socket: sock,
+        }
+    }
+}
+
+fn handle_arp_from_right(eth_frame: &EthernetFrame, left_info: &LinkInfo) {
     let EthernetPayload::Arp(ref arp_packet) = eth_frame.payload;
     if arp_packet.hwtype == 1
         && arp_packet.proto == ETH_P_IP
         && arp_packet.hwsize == 6
         && arp_packet.protosize == 4
+        && arp_packet.opcode == 2 //response
     {
-        if arp_packet.opcode == 1 { //request
-            handle_arp_request(arp_packet)
-        } else if arp_packet.opcode == 2 { //response
-            handle_arp_response(arp_packet)
-        }
+        println!("send to {} ARP response from {} is-at {}", left_info.ifname, netmap_ip(arp_packet.sender_ip, left_info.addr, left_info.mask), left_info.hwaddr);
     }
 }
 
-fn handle_arp_from_left(eth_frame: &EthernetFrame) {
+fn handle_arp_from_left(eth_frame: &EthernetFrame, right_info: &LinkInfo) {
     let EthernetPayload::Arp(ref arp_packet) = eth_frame.payload;
     if arp_packet.hwtype == 1
         && arp_packet.proto == ETH_P_IP
         && arp_packet.hwsize == 6
         && arp_packet.protosize == 4
+        && arp_packet.opcode == 1 //request
     {
-        if arp_packet.opcode == 1 { //request
-            handle_arp_request(arp_packet)
-        } else if arp_packet.opcode == 2 { //response
-            handle_arp_response(arp_packet)
-        }
+        println!("send to {} ARP request: from {} ({}) who-has {}?", right_info.ifname, right_info.hwaddr, right_info.addr, netmap_ip(arp_packet.target_ip, right_info.addr, right_info.mask));
     }
 }
 
-fn do_recv(listen_socket: libc::c_int, ctrl_socket: libc::c_int, handle_arp_packet: fn(&EthernetFrame)) -> SocketError {
+fn do_recv(listen_socket: libc::c_int, ctrl_socket: libc::c_int, handle_arp_packet: fn(&EthernetFrame, &LinkInfo), link_info: LinkInfo) -> SocketError
+{
     let buf = [0u8; RECV_BUF_LEN];
     let mut recv_sockaddr = unsafe { std::mem::zeroed::<libc::sockaddr_ll>() };
     let mut recv_sockaddr_len: u32 = std::mem::size_of_val(&recv_sockaddr) as u32;
@@ -343,7 +423,7 @@ fn do_recv(listen_socket: libc::c_int, ctrl_socket: libc::c_int, handle_arp_pack
         //TODO minimum arp packet length?
         if recv_result >= 42 {
             match eth_frame_parser(&buf[0..(recv_result as usize)]) {
-                nom::IResult::Done(_i, frame) => handle_arp_packet(&frame),
+                nom::IResult::Done(_i, frame) => handle_arp_packet(&frame, &link_info),
                 nom::IResult::Error(err) => println!("Parser error: {:?}", err),
                 nom::IResult::Incomplete(needed) => println!("Parser incomplete: {:?}", needed)
             }
@@ -357,10 +437,11 @@ struct Worker<T> {
     thread: std::thread::JoinHandle<T>,
 }
 
-fn create_worker(iface: &str, ctrl_socket: libc::c_int, callback: fn(&EthernetFrame)) -> Result<Worker<SocketError>, SocketError> {
+fn create_worker(iface: &str, ctrl_socket: libc::c_int, callback: fn(&EthernetFrame, &LinkInfo), link_info: LinkInfo) -> Result<Worker<SocketError>, SocketError>
+{
     let thread = match create_listen_socket(&iface) {
         Ok(sock) => std::thread::spawn(move || {
-            let ret = do_recv(sock, ctrl_socket, callback);
+            let ret = do_recv(sock, ctrl_socket, callback, link_info);
             unsafe { libc::write(ctrl_socket, std::mem::transmute(&'\0'), 1) };
             return ret;
         }),
@@ -388,12 +469,14 @@ fn main_wrapper() -> i32 {
 
     //unwrap is ok because arg count has been checked
     let left_iface = args.next().unwrap();
-    let left_worker = match create_worker(&left_iface, left_ctrl, handle_arp_from_left) {
+    let right_iface = args.next().unwrap();
+    let left_info = LinkInfo::new(&left_iface);
+    let right_info = LinkInfo::new(&right_iface);
+    let left_worker = match create_worker(&left_iface, left_ctrl, handle_arp_from_left, right_info) {
         Ok(worker) => worker,
         Err(err) => panic!("TODO")
     };
-    let right_iface = args.next().unwrap();
-    let right_worker = match create_worker(&right_iface, right_ctrl, handle_arp_from_right) {
+    let right_worker = match create_worker(&right_iface, right_ctrl, handle_arp_from_right, left_info) {
         Ok(worker) => worker,
         Err(err) => panic!("TODO")
     };
