@@ -10,14 +10,21 @@ extern crate nom;
 use std::io::Write;
 use rustc_serialize::hex::ToHex;
 
+#[cfg(target_env = "gnu")]
+#[allow(non_camel_case_types)]
+type ioctl_request_t = libc::c_ulong;
+#[cfg(target_env = "musl")]
+#[allow(non_camel_case_types)]
+type ioctl_request_t = libc::c_int;
+
 const ETH_P_ALL: u16 = 0x0003;
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_ARP: u16 = 0x0806;
 const IFNAMSIZ: usize = 16; // net/if.h
-const SIOCGIFADDR: libc::c_ulong = 0x8915;
-const SIOCGIFNETMASK: libc::c_ulong = 0x891b;
-const SIOCGIFHWADDR: libc::c_ulong = 0x8927;
-const SIOCGIFINDEX: libc::c_ulong = 0x8933;
+const SIOCGIFADDR: ioctl_request_t = 0x8915;
+const SIOCGIFNETMASK: ioctl_request_t = 0x891b;
+const SIOCGIFHWADDR: ioctl_request_t = 0x8927;
+const SIOCGIFINDEX: ioctl_request_t = 0x8933;
 const RECV_BUF_LEN: usize = 1522;
 const SO_ATTACH_FILTER: libc::c_int = 26;
 const SOCK_SEQPACKET: libc::c_int = 5;
